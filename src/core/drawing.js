@@ -44,15 +44,34 @@ export async function drawShape({ shape, point, point2, overrides: overridesRaw,
   return { success: true, shape, entity_id: result?.entity_id };
 }
 
-export async function listDrawings() {
+export async function listDrawings({ detailed = false } = {}) {
   const apiPath = await getChartApi();
-  const shapes = await evaluate(`
-    (function() {
-      var api = ${apiPath};
-      var all = api.getAllShapes();
-      return all.map(function(s) { return { id: s.id, name: s.name }; });
-    })()
-  `);
+  // Plain mode: just id + name (one cheap call). Detailed mode: also read each
+  // shape's first-point price + line style/color/width in the SAME round-trip,
+  // so callers don't need a draw_get_properties per shape.
+  const shapes = detailed
+    ? await evaluate(`
+      (function() {
+        var api = ${apiPath};
+        return api.getAllShapes().map(function(s) {
+          var a, pts, p;
+          try { a = api.getShapeById(s.id); } catch(e) {}
+          try { pts = a.getPoints(); } catch(e) {}
+          try { p = a.getProperties(); } catch(e) {}
+          return { id: s.id, name: s.name,
+                   price: pts && pts[0] && pts[0].price,
+                   linecolor: p && p.linecolor, linewidth: p && p.linewidth,
+                   linestyle: p && p.linestyle };
+        });
+      })()
+    `)
+    : await evaluate(`
+      (function() {
+        var api = ${apiPath};
+        var all = api.getAllShapes();
+        return all.map(function(s) { return { id: s.id, name: s.name }; });
+      })()
+    `);
   return { success: true, count: shapes?.length || 0, shapes: shapes || [] };
 }
 
@@ -79,6 +98,30 @@ export async function getProperties({ entity_id }) {
         for (var i = 0; i < all.length; i++) { if (all[i].id === eid) { props.name = all[i].name; break; } }
       } catch(e) {}
       return props;
+    })()
+  `);
+  if (result?.error) throw new Error(result.error);
+  return { success: true, ...result };
+}
+
+export async function setProperties({ entity_id, overrides: overridesRaw }) {
+  const apiPath = await getChartApi();
+  const overrides = overridesRaw
+    ? (typeof overridesRaw === 'string' ? JSON.parse(overridesRaw) : overridesRaw)
+    : {};
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides) || !Object.keys(overrides).length) {
+    throw new Error('overrides must be a non-empty object of properties to set (e.g. {"linestyle":2,"linecolor":"rgba(242,54,69,1)","linewidth":2})');
+  }
+  const result = await evaluate(`
+    (function() {
+      var api = ${apiPath};
+      var eid = ${safeString(entity_id)};
+      var shape = api.getShapeById(eid);
+      if (!shape) return { error: 'Shape not found: ' + eid };
+      shape.setProperties(${JSON.stringify(overrides)});
+      var p = {};
+      try { p = shape.getProperties(); } catch(e) {}
+      return { entity_id: eid, linecolor: p.linecolor, linewidth: p.linewidth, linestyle: p.linestyle };
     })()
   `);
   if (result?.error) throw new Error(result.error);
