@@ -132,6 +132,43 @@ export async function disconnect() {
   }
 }
 
+/**
+ * Re-point the persistent CDP client at a specific page target by id.
+ * This is what makes tab switching actually move the read/control tools —
+ * unlike /json/activate alone, which only changes OS focus.
+ */
+export async function reattach(targetId) {
+  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const targets = await resp.json();
+  const target = targets.find(t => t.id === targetId && t.type === 'page');
+  if (!target) throw new Error(`No page target with id ${targetId}`);
+  if (client) { try { await client.close(); } catch {} client = null; }
+  targetInfo = target;
+  client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
+  await client.Runtime.enable();
+  await client.Page.enable();
+  await client.DOM.enable();
+  return target;
+}
+
+/**
+ * Evaluate an expression on an arbitrary target via a throwaway connection,
+ * without disturbing the persistent client. Used to read each tab's symbol
+ * when switching by symbol.
+ */
+export async function evaluateOnTarget(targetId, expression) {
+  const c = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
+  try {
+    const r = await c.Runtime.evaluate({ expression, returnByValue: true });
+    if (r.exceptionDetails) {
+      throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'eval error');
+    }
+    return r.result?.value;
+  } finally {
+    try { await c.close(); } catch {}
+  }
+}
+
 // --- Direct API path helpers ---
 // Each returns the STRING expression path after verifying it exists.
 // Callers use the returned string in their own evaluate() calls.

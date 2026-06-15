@@ -2,15 +2,18 @@
  * Core tab management logic.
  * Controls TradingView Desktop tabs via CDP and Electron keyboard shortcuts.
  */
-import { getClient, evaluate } from '../connection.js';
+import { getClient, evaluate, reattach, evaluateOnTarget } from '../connection.js';
 
 const CDP_HOST = 'localhost';
 const CDP_PORT = 9222;
+const SYMBOL_JS = 'window.TradingViewApi.activeChart().symbol()';
 
 /**
  * List all open chart tabs (CDP page targets).
+ * Pass { withSymbols: true } to also read each tab's current symbol (one
+ * throwaway CDP connection per tab, in parallel).
  */
-export async function list() {
+export async function list({ withSymbols = false } = {}) {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
 
@@ -23,6 +26,13 @@ export async function list() {
       url: t.url,
       chart_id: t.url.match(/\/chart\/([^/?]+)/)?.[1] || null,
     }));
+
+  if (withSymbols) {
+    await Promise.all(tabs.map(async (t) => {
+      try { t.symbol = await evaluateOnTarget(t.id, SYMBOL_JS); }
+      catch { t.symbol = null; }
+    }));
+  }
 
   return { success: true, tab_count: tabs.length, tabs };
 }
@@ -83,7 +93,8 @@ export async function closeTab() {
 }
 
 /**
- * Switch to a tab by index. Reconnects CDP to the new target.
+ * Switch to a tab by index. Re-points the persistent CDP client at the new
+ * target (so reads/controls follow) AND brings it to OS focus.
  */
 export async function switchTab({ index }) {
   const tabs = await list();
@@ -94,13 +105,52 @@ export async function switchTab({ index }) {
   }
 
   const target = tabs.tabs[idx];
+  try { await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/activate/${target.id}`); } catch {}
+  await reattach(target.id);
 
-  // Use CDP Target.activateTarget to bring the tab to front
-  try {
-    const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/activate/${target.id}`);
-    const text = await resp.text();
-    return { success: true, action: 'switched', index: idx, tab_id: target.id, chart_id: target.chart_id };
-  } catch (e) {
-    throw new Error(`Failed to activate tab ${idx}: ${e.message}`);
+  let symbol = null;
+  try { symbol = await evaluate(SYMBOL_JS); } catch {}
+  return { success: true, action: 'switched', index: idx, tab_id: target.id, chart_id: target.chart_id, symbol };
+}
+
+/**
+ * Switch to the tab currently displaying a given symbol. Reads every tab's
+ * symbol, re-points the persistent CDP client at the first match, and brings
+ * it to OS focus. Match is case-insensitive on either the full ticker
+ * (NASDAQ:AUGO) or the bare ticker (AUGO).
+ */
+export async function switchToSymbol({ symbol }) {
+  if (!symbol) throw new Error('symbol is required');
+  const want = String(symbol).toUpperCase();
+  const wantBare = want.split(':').pop();
+  const tabs = await list();
+
+  const matches = [];
+  await Promise.all(tabs.tabs.map(async (t) => {
+    let sym = null;
+    try { sym = await evaluateOnTarget(t.id, SYMBOL_JS); } catch {}
+    if (!sym) return;
+    const u = String(sym).toUpperCase();
+    if (u === want || u.split(':').pop() === wantBare) matches.push({ ...t, symbol: sym });
+  }));
+
+  if (matches.length === 0) {
+    throw new Error(`No open tab shows symbol "${symbol}". Use tab_list with_symbols=true to see what's open.`);
   }
+
+  const target = matches[0];
+  try { await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/activate/${target.id}`); } catch {}
+  await reattach(target.id);
+
+  let confirmed = null;
+  try { confirmed = await evaluate(SYMBOL_JS); } catch {}
+  return {
+    success: true,
+    action: 'switched',
+    tab_id: target.id,
+    chart_id: target.chart_id,
+    symbol: confirmed,
+    match_count: matches.length,
+    other_matches: matches.slice(1).map(m => ({ id: m.id, chart_id: m.chart_id })),
+  };
 }
