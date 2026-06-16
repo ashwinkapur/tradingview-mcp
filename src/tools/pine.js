@@ -40,10 +40,11 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_new', 'Create a new blank Pine Script', {
+  server.tool('pine_new', 'Create a new blank Pine Script via the real "Create new" dropdown flow (opens a SEPARATE new script; does NOT overwrite the currently-loaded script).', {
     type: z.enum(['indicator', 'strategy', 'library']).describe('Type of script to create'),
-  }, async ({ type }) => {
-    try { return jsonResult(await core.newScript({ type })); }
+    save: z.boolean().optional().describe('If the current buffer has unsaved edits, whether to save them first. Default false (discards unsaved edits — the existing SAVED script is untouched).'),
+  }, async ({ type, save }) => {
+    try { return jsonResult(await core.newScript({ type, save })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

@@ -505,33 +505,102 @@ export async function smartCompile() {
   };
 }
 
-export async function newScript({ type }) {
+export async function newScript({ type, save = false }) {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const typeMap = { indicator: 'indicator', strategy: 'strategy', library: 'library' };
-  const templates = {
-    indicator: '//@version=6\nindicator("My script")\nplot(close)',
-    strategy: '//@version=6\nstrategy("My strategy", overlay=true)\n',
-    library: '//@version=6\n// @description TODO: add library description here\nlibrary("MyLibrary")\n',
-  };
+  const label = type === 'strategy' ? 'Strategy' : type === 'library' ? 'Library' : 'Indicator';
 
-  const template = templates[type] || templates.indicator;
-
-  // Simply set the source to a new template — this is the most reliable approach
-  const escaped = JSON.stringify(template);
-  const set = await evaluate(`
+  // Drive TradingView's real "Create new" flow via the script-name dropdown.
+  // This opens a SEPARATE new script — unlike setValue(), which would clobber the
+  // buffer of whatever script is currently loaded (e.g. overwriting a saved script).
+  // If the current buffer has unsaved edits, TradingView prompts to save them:
+  // save=false (default) clicks "No" so the existing SAVED script is left untouched.
+  const result = await evaluateAsync(`
     (function() {
-      var m = ${FIND_MONACO};
-      if (!m) return false;
-      m.editor.setValue(${escaped});
-      return true;
+      var TARGET = ${JSON.stringify(label)};
+      var SAVE = ${save ? 'true' : 'false'};
+      function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+      function visible(el) { return el && el.getBoundingClientRect().width > 0; }
+      function fireHover(el) {
+        ['pointerover','pointerenter','mouseover','mouseenter','mousemove'].forEach(function(t) {
+          el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+        });
+      }
+      async function run() {
+        // 1. Open the script-name dropdown.
+        var nameBtn = [].slice.call(document.querySelectorAll('[class*="nameButton"]')).find(visible);
+        if (!nameBtn) return { error: 'Script-name dropdown not found. Is the Pine Editor open?' };
+        var prevName = (nameBtn.textContent || '').trim();
+        nameBtn.click();
+
+        // 2. Find and hover the "Create new" item to reveal the type submenu.
+        var createNew = null;
+        for (var i = 0; i < 30; i++) {
+          await sleep(50);
+          createNew = [].slice.call(document.querySelectorAll('[role="menuitem"]'))
+            .find(function(e) { return visible(e) && /^Create new$/i.test((e.textContent || '').trim()); });
+          if (createNew) break;
+        }
+        if (!createNew) return { error: '"Create new" menu item not found.' };
+
+        // 3. Click the type leaf (Indicator/Strategy/Library) once the submenu opens.
+        var item = null;
+        for (var j = 0; j < 30; j++) {
+          fireHover(createNew);
+          await sleep(50);
+          item = [].slice.call(document.querySelectorAll('[role="menuitem"]'))
+            .find(function(e) { return visible(e) && (e.textContent || '').trim() === TARGET; });
+          if (!item) {
+            item = [].slice.call(document.querySelectorAll('*')).find(function(e) {
+              return e.children.length === 0 && visible(e) && (e.textContent || '').trim() === TARGET;
+            });
+          }
+          if (item) break;
+        }
+        if (!item) return { error: 'Submenu item "' + TARGET + '" not found.' };
+        var clickTarget = item.closest('[role="menuitem"]') || item;
+        clickTarget.click();
+
+        // 4. Handle the "You have unsaved changes…" confirmation, if it appears.
+        var savedPrev = false;
+        for (var k = 0; k < 20; k++) {
+          await sleep(50);
+          var dlg = [].slice.call(document.querySelectorAll('[class*="dialog"],[role="dialog"]'))
+            .find(function(d) { return visible(d) && /unsaved changes/i.test(d.textContent || ''); });
+          if (dlg) {
+            var want = SAVE ? 'Yes' : 'No';
+            var btn = [].slice.call(dlg.querySelectorAll('button'))
+              .find(function(b) { return (b.textContent || '').trim() === want; });
+            if (btn) { btn.click(); savedPrev = SAVE; }
+            break;
+          }
+        }
+
+        // 5. Wait for the new blank script to load (name button changes / buffer resets).
+        var newName = prevName;
+        for (var n = 0; n < 30; n++) {
+          await sleep(50);
+          var nb = [].slice.call(document.querySelectorAll('[class*="nameButton"]')).find(visible);
+          newName = nb ? (nb.textContent || '').trim() : newName;
+          if (newName && newName !== prevName) break;
+        }
+        return { success: true, name: newName, saved_previous: savedPrev };
+      }
+      return run();
     })()
   `);
 
-  if (!set) throw new Error('Monaco editor not found. Ensure Pine Editor is open.');
+  if (result?.error) throw new Error(result.error);
 
-  return { success: true, type, action: 'new_script_created', template: typeMap[type] };
+  return {
+    success: true,
+    type,
+    action: 'new_script_created',
+    template: label.toLowerCase(),
+    name: result?.name,
+    saved_previous: result?.saved_previous ?? false,
+  };
 }
 
 export async function openScript({ name }) {
