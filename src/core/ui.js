@@ -31,32 +31,79 @@ export async function click({ by, value }) {
 export async function openPanel({ panel, action }) {
   const isBottomPanel = panel === 'pine-editor' || panel === 'strategy-tester';
   if (isBottomPanel) {
+    // Pine Editor / Strategy Tester can render either bottom-docked (legacy
+    // bottomWidgetBar) OR as a right-side overlay launched by a dialog button.
+    // We try the widget-bar API first, fall back to clicking the overlay's
+    // launcher, then VERIFY the panel actually reached the requested state by
+    // polling for the panel's content element. Never report success blindly.
     const widgetName = panel === 'pine-editor' ? 'pine-editor' : 'backtesting';
-    const result = await evaluate(`
-      (function() {
-        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
-        if (!bwb) return { error: 'bottomWidgetBar not available' };
+    const dialogButton = panel === 'pine-editor' ? 'pine-dialog-button' : 'backtesting-dialog-button';
+    const result = await evaluateAsync(`
+      (async function() {
         var panel = ${JSON.stringify(panel)};
         var widgetName = ${JSON.stringify(widgetName)};
         var action = ${JSON.stringify(action)};
-        var bottomArea = document.querySelector('[class*="layout__area--bottom"]');
-        var isOpen = !!(bottomArea && bottomArea.offsetHeight > 50);
-        if (panel === 'pine-editor') { var monacoEl = document.querySelector('.monaco-editor.pine-editor-monaco'); isOpen = isOpen && !!monacoEl; }
-        if (panel === 'strategy-tester') { var stratPanel = document.querySelector('[data-name="backtesting"]') || document.querySelector('[class*="strategyReport"]'); isOpen = isOpen && !!(stratPanel && stratPanel.offsetParent); }
-        var performed = 'none';
-        if (action === 'open' || (action === 'toggle' && !isOpen)) {
-          if (panel === 'pine-editor') { if (typeof bwb.activateScriptEditorTab === 'function') bwb.activateScriptEditorTab(); else if (typeof bwb.showWidget === 'function') bwb.showWidget(widgetName); }
-          else { if (typeof bwb.showWidget === 'function') bwb.showWidget(widgetName); }
-          performed = 'opened';
-        } else if (action === 'close' || (action === 'toggle' && isOpen)) {
-          if (typeof bwb.hideWidget === 'function') bwb.hideWidget(widgetName);
-          performed = 'closed';
+        var dialogButtonName = ${JSON.stringify(dialogButton)};
+
+        function visible(el) {
+          if (!el) return false;
+          if (el.getClientRects().length === 0) return false;
+          var r = el.getBoundingClientRect();
+          return r.height > 4 && r.width > 4;
         }
-        return { was_open: isOpen, performed: performed };
+        // Works for both bottom-docked and overlay variants — keys off the
+        // panel's own content element, not the bottom layout area height.
+        function isOpen() {
+          if (panel === 'pine-editor') {
+            return visible(document.querySelector('.monaco-editor.pine-editor-monaco'));
+          }
+          return visible(document.querySelector('[data-name="backtesting"]') || document.querySelector('[class*="strategyReport"]'));
+        }
+        function wait(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+        async function waitFor(want, timeoutMs) {
+          var deadline = Date.now() + timeoutMs;
+          while (Date.now() < deadline) {
+            if (isOpen() === want) return true;
+            await wait(100);
+          }
+          return isOpen() === want;
+        }
+
+        var wasOpen = isOpen();
+        var wantOpen = action === 'open' ? true : action === 'close' ? false : !wasOpen;
+        if (wantOpen === wasOpen) {
+          return { was_open: wasOpen, is_open: wasOpen, performed: wasOpen ? 'already_open' : 'already_closed', used_fallback: false };
+        }
+
+        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
+        var usedFallback = false;
+        var ok;
+        if (wantOpen) {
+          if (bwb) {
+            if (panel === 'pine-editor' && typeof bwb.activateScriptEditorTab === 'function') bwb.activateScriptEditorTab();
+            else if (typeof bwb.showWidget === 'function') bwb.showWidget(widgetName);
+          }
+          ok = await waitFor(true, 1500);
+          if (!ok) {
+            var openBtn = document.querySelector('[data-name="' + dialogButtonName + '"]');
+            if (openBtn) { openBtn.click(); usedFallback = true; ok = await waitFor(true, 2000); }
+          }
+        } else {
+          if (bwb && typeof bwb.hideWidget === 'function') bwb.hideWidget(widgetName);
+          ok = await waitFor(false, 1500);
+          if (!ok) {
+            var closeBtn = document.querySelector('[data-name="' + dialogButtonName + '"]');
+            if (closeBtn) { closeBtn.click(); usedFallback = true; ok = await waitFor(false, 2000); }
+          }
+        }
+        return { was_open: wasOpen, is_open: isOpen(), performed: ok ? (wantOpen ? 'opened' : 'closed') : 'failed', used_fallback: usedFallback };
       })()
     `);
     if (result && result.error) throw new Error(result.error);
-    return { success: true, panel, action, was_open: result?.was_open ?? false, performed: result?.performed ?? 'unknown' };
+    if (result.performed === 'failed') {
+      throw new Error(`Failed to ${action} ${panel}: panel is ${result.is_open ? 'open' : 'closed'} after action (used_fallback=${result.used_fallback})`);
+    }
+    return { success: true, panel, action, was_open: result.was_open, is_open: result.is_open, performed: result.performed, used_fallback: result.used_fallback };
   } else {
     const selectorMap = {
       'watchlist': { dataName: 'base-watchlist-widget-button', ariaLabel: 'Watchlist' },
@@ -64,27 +111,46 @@ export async function openPanel({ panel, action }) {
       'trading': { dataName: 'trading-button', ariaLabel: 'Trading Panel' },
     };
     const sel = selectorMap[panel];
-    const result = await evaluate(`
-      (function() {
+    const result = await evaluateAsync(`
+      (async function() {
         var dataName = ${JSON.stringify(sel.dataName)};
         var ariaLabel = ${JSON.stringify(sel.ariaLabel)};
         var action = ${JSON.stringify(action)};
         var btn = document.querySelector('[data-name="' + dataName + '"]') || document.querySelector('[aria-label="' + ariaLabel + '"]');
         if (!btn) return { error: 'Button not found for panel: ' + ${JSON.stringify(panel)} };
-        var isActive = btn.getAttribute('aria-pressed') === 'true' || btn.classList.contains('isActive') || btn.classList.toString().indexOf('active') !== -1 || btn.classList.toString().indexOf('Active') !== -1;
-        var rightArea = document.querySelector('[class*="layout__area--right"]');
-        var sidebarOpen = !!(rightArea && rightArea.offsetWidth > 50);
-        var isOpen = isActive && sidebarOpen;
-        var performed = 'none';
-        if (action === 'open' && !isOpen) { btn.click(); performed = 'opened'; }
-        else if (action === 'close' && isOpen) { btn.click(); performed = 'closed'; }
-        else if (action === 'toggle') { btn.click(); performed = isOpen ? 'closed' : 'opened'; }
-        else { performed = isOpen ? 'already_open' : 'already_closed'; }
-        return { was_open: isOpen, performed: performed };
+
+        function isOpen() {
+          var b = document.querySelector('[data-name="' + dataName + '"]') || document.querySelector('[aria-label="' + ariaLabel + '"]');
+          var isActive = !!b && (b.getAttribute('aria-pressed') === 'true' || b.classList.contains('isActive') || /active/i.test(b.classList.toString()));
+          var rightArea = document.querySelector('[class*="layout__area--right"]');
+          var sidebarOpen = !!(rightArea && rightArea.offsetWidth > 50);
+          return isActive && sidebarOpen;
+        }
+        function wait(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+        async function waitFor(want, timeoutMs) {
+          var deadline = Date.now() + timeoutMs;
+          while (Date.now() < deadline) {
+            if (isOpen() === want) return true;
+            await wait(100);
+          }
+          return isOpen() === want;
+        }
+
+        var wasOpen = isOpen();
+        var wantOpen = action === 'open' ? true : action === 'close' ? false : !wasOpen;
+        if (wantOpen === wasOpen) {
+          return { was_open: wasOpen, is_open: wasOpen, performed: wasOpen ? 'already_open' : 'already_closed' };
+        }
+        btn.click();
+        var ok = await waitFor(wantOpen, 1500);
+        return { was_open: wasOpen, is_open: isOpen(), performed: ok ? (wantOpen ? 'opened' : 'closed') : 'failed' };
       })()
     `);
     if (result && result.error) throw new Error(result.error);
-    return { success: true, panel, action, was_open: result?.was_open ?? false, performed: result?.performed ?? 'unknown' };
+    if (result.performed === 'failed') {
+      throw new Error(`Failed to ${action} ${panel}: panel is ${result.is_open ? 'open' : 'closed'} after action`);
+    }
+    return { success: true, panel, action, was_open: result.was_open, is_open: result.is_open, performed: result.performed };
   }
 }
 
