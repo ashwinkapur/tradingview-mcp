@@ -35,6 +35,11 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  server.tool('pine_close', 'Close the Pine Editor panel/overlay if it is open (no-op if already closed)', {}, async () => {
+    try { return jsonResult(await core.closeEditor()); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('pine_smart_compile', 'Intelligent compile: detects button, compiles, checks errors, reports study changes', {}, async () => {
     try { return jsonResult(await core.smartCompile()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

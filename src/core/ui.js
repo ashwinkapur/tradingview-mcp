@@ -92,7 +92,22 @@ export async function openPanel({ panel, action }) {
           if (bwb && typeof bwb.hideWidget === 'function') bwb.hideWidget(widgetName);
           ok = await waitFor(false, 1500);
           if (!ok) {
-            var closeBtn = document.querySelector('[data-name="' + dialogButtonName + '"]');
+            // The overlay launcher button only OPENS/focuses the panel — it does
+            // NOT close it. Click the overlay's own X (aria-label="Close"), found
+            // by walking up from the panel content to the dialog container.
+            function panelContentEl() {
+              if (panel === 'pine-editor') return document.querySelector('.monaco-editor.pine-editor-monaco') || document.querySelector('.monaco-editor');
+              return document.querySelector('[data-name="backtesting"]') || document.querySelector('[class*="strategyReport"]');
+            }
+            var node = panelContentEl();
+            var closeBtn = null;
+            for (var k = 0; k < 15 && node; k++) {
+              node = node.parentElement;
+              if (!node) break;
+              closeBtn = node.querySelector('button[aria-label="Close"]');
+              if (closeBtn) break;
+            }
+            if (!closeBtn) closeBtn = document.querySelector('[data-name="' + dialogButtonName + '"]');
             if (closeBtn) { closeBtn.click(); usedFallback = true; ok = await waitFor(false, 2000); }
           }
         }

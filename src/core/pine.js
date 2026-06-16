@@ -73,6 +73,72 @@ export async function ensurePineEditorOpen() {
   return false;
 }
 
+/**
+ * Closes the Pine Editor panel if it is open. No-op (success) when already closed.
+ *
+ * The editor is a right-side dialog overlay; its Close (X) lives in a sibling
+ * header within the same overlay as the Monaco container, under build-hashed
+ * class names. Rather than hard-code those, we anchor on the Monaco node and
+ * walk up to the nearest ancestor that also contains the overlay's Close button.
+ * Fallbacks (toggling the Pine dialog button, then the bottom widget bar) cover
+ * the bottom-docked editor layout.
+ */
+export async function closeEditor() {
+  const result = await evaluateAsync(`
+    (function() {
+      function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+      function monacoEl() { return document.querySelector('.monaco-editor.pine-editor-monaco'); }
+      function isOpen() { var m = monacoEl(); return !!(m && m.getBoundingClientRect().width > 0); }
+      function findCloseBtn() {
+        var m = monacoEl();
+        if (!m) return null;
+        var node = m;
+        for (var i = 0; i < 12 && node; i++) {
+          if (node.querySelector) {
+            var c = node.querySelector('[aria-label="Close"], [data-name="close"]');
+            if (c && c.getBoundingClientRect().width > 0) return c;
+          }
+          node = node.parentElement;
+        }
+        return null;
+      }
+      async function waitClosed(tries) {
+        for (var i = 0; i < tries && isOpen(); i++) { await sleep(120); }
+        return !isOpen();
+      }
+      async function run() {
+        if (!isOpen()) return { success: true, was_open: false, action: 'noop' };
+        var actions = [];
+        // 1) The overlay's own Close (X) button — the normal path.
+        var btn = findCloseBtn();
+        if (btn) { btn.click(); actions.push('close-button'); await waitClosed(10); }
+        // 2) Toggle the Pine dialog button (only reached if still open).
+        if (isOpen()) {
+          var tgl = document.querySelector('[data-name="pine-dialog-button"]') || document.querySelector('[aria-label="Pine"]');
+          if (tgl) { tgl.click(); actions.push('toggle-button'); await waitClosed(10); }
+        }
+        // 3) Bottom-docked layout fallback.
+        if (isOpen()) {
+          var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
+          if (bwb) {
+            if (typeof bwb.hide === 'function') bwb.hide();
+            else if (typeof bwb.close === 'function') bwb.close();
+            actions.push('bottom-widget-bar');
+            await waitClosed(10);
+          }
+        }
+        return { success: true, was_open: true, closed: !isOpen(), actions: actions };
+      }
+      return run();
+    })()
+  `);
+
+  if (result && result.was_open && result.closed === false) {
+    return { ...result, warning: 'Editor still appears open after all close attempts.' };
+  }
+  return result;
+}
+
 // ── Pure / offline functions ──
 
 export function analyze({ source }) {
@@ -290,20 +356,24 @@ export async function compile() {
       var btns = document.querySelectorAll('button');
       var fallback = null;
       var saveBtn = null;
+      // The editor's action buttons are icon-only: their label lives in the
+      // title (or aria-label) attribute, NOT textContent. Match on all three.
+      function lbl(b) { return (b.getAttribute('title') || b.getAttribute('aria-label') || b.textContent || '').trim(); }
       for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
+        if (btns[i].offsetParent === null) continue;
+        var text = lbl(btns[i]);
         if (/save and add to chart/i.test(text)) {
           btns[i].click();
           return 'Save and add to chart';
         }
-        if (!fallback && /^(Add to chart|Update on chart)/i.test(text)) {
+        if (!fallback && /^(Add to chart|Update on chart)$/i.test(text)) {
           fallback = btns[i];
         }
-        if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) {
+        if (!saveBtn && (btns[i].className.indexOf('saveButton') !== -1 || /^save script$/i.test(text))) {
           saveBtn = btns[i];
         }
       }
-      if (fallback) { fallback.click(); return fallback.textContent.trim(); }
+      if (fallback) { var fl = lbl(fallback); fallback.click(); return fl; }
       if (saveBtn) { saveBtn.click(); return 'Pine Save'; }
       return null;
     })()
@@ -446,15 +516,18 @@ export async function smartCompile() {
       var addBtn = null;
       var updateBtn = null;
       var saveBtn = null;
+      // Icon-only buttons carry their label in title/aria-label, not textContent.
+      function lbl(b) { return (b.getAttribute('title') || b.getAttribute('aria-label') || b.textContent || '').trim(); }
       for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
+        if (btns[i].offsetParent === null) continue;
+        var text = lbl(btns[i]);
         if (/save and add to chart/i.test(text)) {
           btns[i].click();
           return 'Save and add to chart';
         }
         if (!addBtn && /^add to chart$/i.test(text)) addBtn = btns[i];
         if (!updateBtn && /^update on chart$/i.test(text)) updateBtn = btns[i];
-        if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) saveBtn = btns[i];
+        if (!saveBtn && (btns[i].className.indexOf('saveButton') !== -1 || /^save script$/i.test(text))) saveBtn = btns[i];
       }
       if (addBtn) { addBtn.click(); return 'Add to chart'; }
       if (updateBtn) { updateBtn.click(); return 'Update on chart'; }

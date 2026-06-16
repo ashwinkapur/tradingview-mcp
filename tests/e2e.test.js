@@ -820,6 +820,29 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
       assert.ok(typeof entries === 'number', 'Console row count returned');
     });
 
+    it('pine_close — close button reachable from Monaco', async () => {
+      const ready = await ensureEditor();
+      if (!ready) return;
+      // Mirrors core.closeEditor's anchor logic: walk up from the Monaco node to
+      // the shared overlay ancestor and find its Close (X) control.
+      const found = await evaluate(`
+        (function() {
+          var m = document.querySelector('.monaco-editor.pine-editor-monaco');
+          if (!m) return false;
+          var node = m;
+          for (var i = 0; i < 12 && node; i++) {
+            if (node.querySelector) {
+              var c = node.querySelector('[aria-label="Close"], [data-name="close"]');
+              if (c && c.getBoundingClientRect().width > 0) return true;
+            }
+            node = node.parentElement;
+          }
+          return false;
+        })()
+      `);
+      assert.equal(found, true, 'Close button reachable from Monaco node');
+    });
+
     it('pine_save — Ctrl+S dispatch', async () => {
       const ready = await ensureEditor();
       if (!ready) return;

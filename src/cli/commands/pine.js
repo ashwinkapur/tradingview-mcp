@@ -102,5 +102,9 @@ register('pine', {
       description: 'Get Pine Script console/log output',
       handler: () => core.getConsole(),
     }],
+    ['close', {
+      description: 'Close the Pine Editor panel if open',
+      handler: () => core.closeEditor(),
+    }],
   ]),
 });
